@@ -116,7 +116,6 @@ function startVirtualDesktop() {
       '-localhost',      // bind 127.0.0.1 only, never externally reachable
       '-forever',        // survive client disconnects, don't exit after first client
       '-shared',
-      '-noxdamage',
       '-nopw',           // no VNC-level password — auth is the existing token gate
       '-quiet',
     ], { stdio: 'ignore', env: { ...process.env, DISPLAY: DISPLAY_NUM } });
