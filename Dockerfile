@@ -11,8 +11,13 @@ FROM node:20-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb x11vnc fluxbox xterm dbus-x11 x11-xserver-utils fonts-dejavu-core \
-      python3 make g++ \
+      python3 python3-pip make g++ \
     && rm -rf /var/lib/apt/lists/*
+
+# Debian marks the system Python as "externally managed" (PEP 668), which
+# blocks plain `pip install`. This is a single-user scratch container, not a
+# shared system, so let pip install into it directly.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 WORKDIR /app
 
