@@ -41,7 +41,22 @@
   .status { margin-left: auto; color: var(--muted); }
   .status.on { color: var(--accent); }
 
-  #terminal { flex: 1; padding: 8px; overflow: hidden; }
+  .tabs { display: none; gap: 4px; margin-left: 16px; }
+  .tabs.show { display: flex; }
+  .tab {
+    padding: 4px 12px;
+    border-radius: 6px;
+    color: var(--muted);
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .tab.active { color: var(--accent); border-color: var(--border); background: var(--bg); }
+
+  #terminal { flex: 1; padding: 8px; overflow: hidden; display: none; }
+  #terminal.active { display: block; }
+  #desktop { flex: 1; padding: 8px; overflow: hidden; display: none; }
+  #desktop.active { display: flex; }
+  #desktop canvas { margin: auto; }
 
   /* Login overlay */
   #login {
@@ -101,10 +116,15 @@
   <div class="topbar">
     <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
     <span class="title">webshell</span>
+    <div id="tabs" class="tabs">
+      <span class="tab active" data-tab="terminal">Terminal</span>
+      <span class="tab" data-tab="desktop">Desktop</span>
+    </div>
     <span id="status" class="status">disconnected</span>
   </div>
 
-  <div id="terminal"></div>
+  <div id="terminal" class="active"></div>
+  <div id="desktop"></div>
 
   <div id="login">
     <div class="card">
@@ -118,10 +138,42 @@
 
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script type="module">
+    import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.7.0/core/rfb.js';
+    window.__RFB = RFB;
+  </script>
   <script>
     const $ = (id) => document.getElementById(id);
     const loginEl = $('login');
     const statusEl = $('status');
+    const tabsEl = $('tabs');
+    let currentToken = null;
+    let rfb = null;
+
+    function switchTab(name) {
+      document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+      $('terminal').classList.toggle('active', name === 'terminal');
+      $('desktop').classList.toggle('active', name === 'desktop');
+      if (name === 'terminal') {
+        fit.fit();
+        term.focus();
+      } else if (name === 'desktop') {
+        connectDesktop();
+      }
+    }
+    tabsEl.addEventListener('click', (e) => {
+      const tab = e.target.closest('.tab');
+      if (tab) switchTab(tab.dataset.tab);
+    });
+
+    function connectDesktop() {
+      if (rfb || !currentToken || !window.__RFB) return;
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const url = `${proto}://${location.host}/vnc-ws?token=${encodeURIComponent(currentToken)}`;
+      rfb = new window.__RFB($('desktop'), url);
+      rfb.scaleViewport = true;
+      rfb.addEventListener('disconnect', () => { rfb = null; });
+    }
 
     const term = new Terminal({
       cursorBlink: true,
@@ -152,6 +204,7 @@
     }
 
     function connect(token) {
+      currentToken = token;
       loginEl.classList.add('hidden');
       openTerminal();
       term.focus();
@@ -215,6 +268,7 @@
       try {
         cfg = await fetch('/api/config').then((r) => r.json());
       } catch {}
+      tabsEl.classList.toggle('show', !!cfg.desktopEnabled);
       if (!cfg.authRequired) {
         login(''); // localhost, no password
       } else {

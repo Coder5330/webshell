@@ -1,10 +1,9 @@
 services:
   - type: web
     name: webshell
-    runtime: node
+    runtime: docker
+    dockerfilePath: ./Dockerfile
     plan: free
-    buildCommand: npm ci
-    startCommand: npm start
     envVars:
       - key: SHELL_PASSWORD
         sync: false
@@ -12,3 +11,7 @@ services:
         value: local
       - key: HOST
         value: 0.0.0.0
+      - key: ENABLE_DESKTOP
+        value: "true"
+      - key: DISPLAY
+        value: ":99"

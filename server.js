@@ -5,7 +5,8 @@ const http = require('http');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
+const net = require('net');
 const WebSocket = require('ws');
 const pty = require('node-pty');
 
@@ -47,6 +48,15 @@ const SHELL =
   (os.platform() === 'win32' ? 'powershell.exe' : process.env.SHELL || 'bash');
 const SHELL_USER = process.env.SHELL_USER || '';
 
+// ---- Virtual desktop config (MODE=local only) --------------------------
+// Lets GUI scripts (e.g. pynput/pygame) run in the shell and draw to a
+// virtual display that's streamed into the browser over VNC/noVNC.
+const ENABLE_DESKTOP = MODE === 'local' && /^(1|true)$/i.test(process.env.ENABLE_DESKTOP || '');
+const DISPLAY_NUM = process.env.DISPLAY || ':99';
+const VNC_PORT = parseInt(process.env.VNC_PORT || '5900', 10);
+const DESKTOP_WIDTH = process.env.DESKTOP_WIDTH || '1280';
+const DESKTOP_HEIGHT = process.env.DESKTOP_HEIGHT || '800';
+
 const isPublicBind = HOST !== '127.0.0.1' && HOST !== 'localhost' && HOST !== '::1';
 if (isPublicBind && !PASSWORD) {
   console.error(
@@ -79,6 +89,39 @@ if (MODE === 'docker') {
     );
     process.exit(1);
   }
+}
+
+// ---- Virtual desktop startup (MODE=local only): Xvfb + fluxbox + x11vnc ---
+// Shared single desktop process for the whole server lifetime — not
+// per-user-isolated. Multiple simultaneous users see/control the same
+// desktop. Revisit by moving this into MODE=docker per-session if
+// concurrent multi-user access is ever needed.
+if (ENABLE_DESKTOP) {
+  startVirtualDesktop();
+}
+
+function startVirtualDesktop() {
+  const xvfb = spawn('Xvfb', [DISPLAY_NUM, '-screen', '0',
+    `${DESKTOP_WIDTH}x${DESKTOP_HEIGHT}x24`, '-nolisten', 'tcp'], { stdio: 'ignore' });
+  xvfb.on('exit', (code) => console.error(`Xvfb exited (code ${code})`));
+
+  // give Xvfb a moment to create the display socket before starting clients
+  setTimeout(() => {
+    const fluxbox = spawn('fluxbox', [], { stdio: 'ignore', env: { ...process.env, DISPLAY: DISPLAY_NUM } });
+    fluxbox.on('exit', (code) => console.error(`fluxbox exited (code ${code})`));
+
+    const vnc = spawn('x11vnc', [
+      '-display', DISPLAY_NUM,
+      '-rfbport', String(VNC_PORT),
+      '-localhost',      // bind 127.0.0.1 only, never externally reachable
+      '-forever',        // survive client disconnects, don't exit after first client
+      '-shared',
+      '-noxdamage',
+      '-nopw',           // no VNC-level password — auth is the existing token gate
+      '-quiet',
+    ], { stdio: 'ignore', env: { ...process.env, DISPLAY: DISPLAY_NUM } });
+    vnc.on('exit', (code) => console.error(`x11vnc exited (code ${code})`));
+  }, 1500);
 }
 
 // ---- Local-mode user resolution (unchanged from the original) ----------
@@ -213,7 +256,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/config', (req, res) => {
-  res.json({ authRequired: PASSWORD.length > 0 });
+  res.json({ authRequired: PASSWORD.length > 0, desktopEnabled: ENABLE_DESKTOP });
 });
 
 app.post('/api/login', (req, res) => {
@@ -238,6 +281,7 @@ app.post('/api/login', (req, res) => {
 // ---- HTTP server + WebSocket upgrade --------------------------------------
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true });
+const vncWss = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
   let url;
@@ -247,17 +291,40 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
     return;
   }
-  if (url.pathname !== '/ws') {
-    socket.destroy();
-    return;
-  }
   const token = url.searchParams.get('token');
   if (!tokenValid(token)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
     return;
   }
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  if (url.pathname === '/ws') {
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  } else if (url.pathname === '/vnc-ws' && ENABLE_DESKTOP) {
+    vncWss.handleUpgrade(req, socket, head, (ws) => vncWss.emit('connection', ws, req));
+  } else {
+    socket.destroy();
+  }
+});
+
+// Raw TCP<->WebSocket bridge to the local x11vnc server, so noVNC's RFB
+// client (binary VNC protocol over WS) can reach it without exposing a
+// second port — reuses the token check above, no separate auth.
+vncWss.on('connection', (ws) => {
+  const tcp = net.connect({ host: '127.0.0.1', port: VNC_PORT });
+  tcp.on('data', (chunk) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
+  });
+  ws.on('message', (data) => {
+    tcp.write(Buffer.isBuffer(data) ? data : Buffer.from(data));
+  });
+  const closeBoth = () => {
+    try { tcp.destroy(); } catch { /* ignore */ }
+    try { ws.close(); } catch { /* ignore */ }
+  };
+  tcp.on('close', closeBoth);
+  tcp.on('error', closeBoth);
+  ws.on('close', closeBoth);
+  ws.on('error', closeBoth);
 });
 
 // ws -> { name, term, lastActivity }. Only populated in docker mode, used
@@ -372,8 +439,9 @@ wss.on('connection', (ws) => {
           LOGNAME: SHELL_USER,
           SHELL: SHELL,
           TERM: 'xterm-color',
+          ...(ENABLE_DESKTOP ? { DISPLAY: DISPLAY_NUM } : {}),
         }
-      : process.env;
+      : { ...process.env, ...(ENABLE_DESKTOP ? { DISPLAY: DISPLAY_NUM } : {}) };
 
     const term = pty.spawn(SHELL, [], {
       name: 'xterm-color',
@@ -444,6 +512,9 @@ server.listen(PORT, HOST, () => {
     console.log(`shell: ${SHELL}`);
     if (dropUser) {
       console.log(`shells run as user "${SHELL_USER}" (uid ${dropUser.uid}), home ${dropUser.home}`);
+    }
+    if (ENABLE_DESKTOP) {
+      console.log(`desktop: enabled (display ${DISPLAY_NUM}, vnc 127.0.0.1:${VNC_PORT})`);
     }
   }
   if (!PASSWORD) {
