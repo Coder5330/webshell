@@ -15,3 +15,7 @@ services:
         value: "true"
       - key: DISPLAY
         value: ":99"
+      - key: DESKTOP_WIDTH
+        value: "640"
+      - key: DESKTOP_HEIGHT
+        value: "480"
