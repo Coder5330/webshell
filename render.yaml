@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: webshell
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    envVars:
+      - key: SHELL_PASSWORD
+        sync: false
