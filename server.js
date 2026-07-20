@@ -438,9 +438,16 @@ wss.on('connection', (ws) => {
           LOGNAME: SHELL_USER,
           SHELL: SHELL,
           TERM: 'xterm-color',
-          ...(ENABLE_DESKTOP ? { DISPLAY: DISPLAY_NUM, SDL_VIDEODRIVER: 'x11' } : {}),
+          ...(ENABLE_DESKTOP
+            ? { DISPLAY: DISPLAY_NUM, SDL_VIDEODRIVER: 'x11', SDL_AUDIODRIVER: 'dummy' }
+            : {}),
         }
-      : { ...process.env, ...(ENABLE_DESKTOP ? { DISPLAY: DISPLAY_NUM, SDL_VIDEODRIVER: 'x11' } : {}) };
+      : {
+          ...process.env,
+          ...(ENABLE_DESKTOP
+            ? { DISPLAY: DISPLAY_NUM, SDL_VIDEODRIVER: 'x11', SDL_AUDIODRIVER: 'dummy' }
+            : {}),
+        };
 
     const term = pty.spawn(SHELL, [], {
       name: 'xterm-color',
