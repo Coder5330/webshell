@@ -1,0 +1,39 @@
+
+# Minimal sandbox image for the webshell. Each browser session gets a fresh
+# container from this image, run with --network none and a locked-down
+# capability set (see server.js). Nothing here should be treated as a place
+# to keep data — the whole filesystem disappears when the session ends.
+ 
+FROM debian:bookworm-slim
+ 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash coreutils grep sed gawk findutils \
+      less nano vim tmux \
+      python3 python3-pip python3-venv \
+      netcat-openbsd file tree curl wget git openssh-client ca-certificates \
+      binutils gdb build-essential \
+      binwalk libimage-exiftool-perl steghide foremost bsdmainutils xxd \
+      unzip zip p7zip-full bzip2 xz-utils \
+      dnsutils nmap jq \
+    && rm -rf /var/lib/apt/lists/*
+# Package groups above, for reference:
+#   shell/core:      bash coreutils grep sed gawk findutils
+#   editors:          less nano vim tmux
+#   python:           python3 python3-pip python3-venv
+#   networking/dev:   netcat-openbsd file tree curl wget git openssh-client ca-certificates
+#   reversing:        binutils gdb build-essential
+#   forensics/stego:  binwalk libimage-exiftool-perl steghide foremost bsdmainutils xxd
+#   archives:         unzip zip p7zip-full bzip2 xz-utils
+#   networking tools: dnsutils nmap jq
+ 
+# Non-root user, pinned to a known uid/gid (1000:1000) so server.js can
+# mount the per-session home directory with matching ownership — otherwise
+# a fresh tmpfs mount defaults to root-owned and this user can't write to
+# its own home. Combined with --read-only + tmpfs mounts in server.js,
+# this user can't touch the image's own files even inside the container.
+RUN groupadd -g 1000 sandbox && useradd -m -u 1000 -g 1000 -s /bin/bash sandbox
+ 
+USER sandbox
+WORKDIR /home/sandbox
+ 
+CMD ["/bin/bash"]
