@@ -11,6 +11,7 @@ FROM node:20-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb x11vnc fluxbox xterm dbus-x11 x11-xserver-utils fonts-dejavu-core \
+      python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
