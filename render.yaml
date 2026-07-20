@@ -8,3 +8,5 @@ services:
     envVars:
       - key: SHELL_PASSWORD
         sync: false
+      - key: MODE
+        value: local
