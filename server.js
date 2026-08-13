@@ -267,7 +267,133 @@ if (MODE === 'local' && SHELL_USER) {
   }
 }
 
-// ---- Simple token store (issued on login, checked on WS upgrade) -----------
+// ---- Full-tree persistence for local mode -------------------------------
+// Editor saves go through fs:write above and are mirrored per-file. But
+// terminal commands (touch, echo >, mv, rm, a script writing output, etc.)
+// touch the filesystem directly via the pty shell and never go through
+// fs:write at all. So in local mode (the only mode where Node can see the
+// real, shared filesystem — docker mode's containers are each private and
+// thrown away), we also periodically walk the whole home directory, mirror
+// any new/changed files to Neon, and remove DB rows for files that vanished
+// locally (e.g. `rm`'d from the terminal). On startup we restore everything
+// Neon knows about back onto disk first, since a fresh deploy means an
+// empty filesystem.
+const LOCAL_PERSIST_ROOT = MODE === 'local' ? (dropUser ? dropUser.home : process.env.HOME || os.homedir()) : null;
+const PERSIST_SKIP_DIRS = new Set(['.git', 'node_modules', '.cache', '.npm']);
+const PERSIST_SYNC_INTERVAL_MS = 5000;
+const PERSIST_DEBOUNCE_MS = 1200; // sync shortly after terminal output goes quiet
+
+// relPath -> mtimeMs, so we only re-read/re-upload files that actually changed.
+const knownFileState = new Map();
+
+async function walkTree(root) {
+  const out = [];
+  async function walk(dir) {
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (PERSIST_SKIP_DIRS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        await walk(full);
+      } else if (e.isFile()) {
+        out.push(full);
+      }
+    }
+  }
+  await walk(root);
+  return out;
+}
+
+let syncInFlight = false;
+async function syncLocalTreeToDb() {
+  if (!pgPool || !LOCAL_PERSIST_ROOT || syncInFlight) return;
+  syncInFlight = true;
+  try {
+    const ok = await ensurePgSchema();
+    if (!ok) return;
+    const files = await walkTree(LOCAL_PERSIST_ROOT);
+    const seen = new Set();
+    for (const full of files) {
+      seen.add(full);
+      let st;
+      try {
+        st = await fsp.stat(full);
+      } catch {
+        continue;
+      }
+      if (st.size > FS_MAX_FILE_BYTES) continue;
+      const prevMtime = knownFileState.get(full);
+      if (prevMtime === st.mtimeMs) continue; // unchanged since last sync
+      try {
+        const data = await fsp.readFile(full);
+        await persistWrite(full, data.toString('base64'));
+        knownFileState.set(full, st.mtimeMs);
+      } catch (e) {
+        console.error('[persist] tree sync read/write failed for', full, e.message);
+      }
+    }
+    // Anything we knew about last time but didn't see this walk was deleted.
+    for (const prevPath of knownFileState.keys()) {
+      if (!seen.has(prevPath)) {
+        knownFileState.delete(prevPath);
+        await persistDelete(prevPath);
+      }
+    }
+  } catch (e) {
+    console.error('[persist] tree sync failed:', e.message);
+  } finally {
+    syncInFlight = false;
+  }
+}
+
+async function restoreLocalTreeFromDb() {
+  if (!pgPool || !LOCAL_PERSIST_ROOT) return;
+  const ok = await ensurePgSchema();
+  if (!ok) return;
+  try {
+    const res = await pgPool.query(
+      `SELECT path, content FROM webshell_files WHERE path LIKE $1`,
+      [`${LOCAL_PERSIST_ROOT}/%`]
+    );
+    for (const row of res.rows) {
+      try {
+        const data = Buffer.from(row.content, 'base64');
+        await fsp.mkdir(path.dirname(row.path), { recursive: true });
+        await fsp.writeFile(row.path, data);
+        const st = await fsp.stat(row.path);
+        knownFileState.set(row.path, st.mtimeMs);
+      } catch (e) {
+        console.error('[persist] restore failed for', row.path, e.message);
+      }
+    }
+    console.log(`persistence: restored ${res.rows.length} file(s) from Neon into ${LOCAL_PERSIST_ROOT}`);
+  } catch (e) {
+    console.error('[persist] restore-all failed:', e.message);
+  }
+}
+
+let debounceTimer = null;
+function scheduleDebouncedSync() {
+  if (!pgPool || !LOCAL_PERSIST_ROOT) return;
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(syncLocalTreeToDb, PERSIST_DEBOUNCE_MS);
+}
+
+if (pgPool && LOCAL_PERSIST_ROOT) {
+  setInterval(syncLocalTreeToDb, PERSIST_SYNC_INTERVAL_MS).unref();
+  const finalSync = () => {
+    syncLocalTreeToDb().finally(() => process.exit(0));
+  };
+  process.on('SIGTERM', finalSync);
+  process.on('SIGINT', finalSync);
+}
+
+
 const TOKEN_TTL_MS = 10 * 60 * 1000;
 const tokens = new Map(); // token -> expiry epoch ms
 
@@ -729,6 +855,7 @@ function wireTerm(ws, term, sessionState, fsCtx) {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'output', data }));
     }
+    scheduleDebouncedSync();
   });
 
   ws.on('message', (raw) => {
@@ -906,9 +1033,23 @@ if (MODE === 'docker') {
   }, 30 * 1000).unref();
 }
 
-server.listen(PORT, HOST, () => {
+server.listen(PORT, HOST, async () => {
   console.log(`web terminal listening on http://${HOST}:${PORT}`);
   console.log(`mode: ${MODE}`);
+  if (pgPool) {
+    console.log('persistence: DATABASE_URL set, connecting to Neon/Postgres...');
+    const ok = await ensurePgSchema();
+    if (ok) {
+      console.log('persistence: connected, webshell_files table ready');
+      if (LOCAL_PERSIST_ROOT) {
+        await restoreLocalTreeFromDb();
+      }
+    } else {
+      console.error('persistence: FAILED to connect/create table — saves will NOT persist. Check DATABASE_URL.');
+    }
+  } else {
+    console.log('persistence: DATABASE_URL not set — saves will NOT survive a restart');
+  }
   if (MODE === 'docker') {
     console.log(
       `sandbox image: ${SANDBOX_IMAGE}  |  limits: ${CONTAINER_MEMORY} mem, ` +
