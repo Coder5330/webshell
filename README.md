@@ -53,6 +53,42 @@ terminal. In `local` mode it touches the host directly via Node's `fs`
 module, at the same trust level the shell already has there. Neither mode
 grants any access beyond what the terminal itself already allows.
 
+## Connecting a Neon (or any Postgres) database
+
+`psql` is now installed in the sandbox image, and `bridge` networking
+(the default) already lets the container reach the internet, so a Neon
+connection just works from the terminal once you're in — the only catch is
+the container's filesystem is wiped every session, so there's nowhere to
+durably `export DATABASE_URL=...` inside it.
+
+Instead, set the connection string on the **host**, and forward it in by
+name:
+
+```bash
+# on the host, before starting the server
+export DATABASE_URL="postgresql://user:password@ep-xxxx.us-east-2.aws.neon.tech/dbname?sslmode=require"
+SANDBOX_ENV_PASSTHROUGH=DATABASE_URL npm start
+```
+
+Every fresh container then gets `DATABASE_URL` set automatically — inside
+the shell you can just run:
+
+```bash
+psql "$DATABASE_URL"
+```
+
+or use it from Python (`psycopg2`/`asyncpg`, installable per-session with
+`pip install --user --break-system-packages psycopg2-binary`, since nothing
+installed in the container survives past that session either).
+
+Only the env var names you list in `SANDBOX_ENV_PASSTHROUGH` are forwarded
+— the rest of the host's environment stays out of the sandbox. Rebuild the
+image after pulling this change so `psql` is actually present:
+
+```bash
+docker build -f Dockerfile.sandbox -t webshell-sandbox .
+```
+
 ## Modes
 
 | `MODE`   | What it does                                                          |
@@ -81,6 +117,7 @@ All via environment variables:
 | `IDLE_TIMEOUT_MIN`  | `20`                | Minutes of inactivity before a session is closed          |
 | `SHELL_CMD`         | `bash` / `powershell` | (local mode only) which shell to launch                |
 | `SHELL_USER`        | *(empty)*           | (local mode only) OS user to drop the shell to, needs `sudo` |
+| `SANDBOX_ENV_PASSTHROUGH` | *(empty)*     | Comma-separated host env var names to forward into every container, e.g. `DATABASE_URL` (see below) |
 
 Example, password-protected and exposed on your LAN:
 
