@@ -5,14 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>webshell</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.css" />
 <style>
   :root {
     --bg: #0b0e14;
     --panel: #10141d;
+    --panel2: #141a26;
     --border: #1f2633;
     --fg: #c7d0e0;
     --accent: #38e0c0;
     --muted: #5b6472;
+    --danger: #ff6b6b;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -23,6 +28,21 @@
     display: flex;
     flex-direction: column;
   }
+  button {
+    font-family: inherit;
+    font-size: 12px;
+    background: var(--panel2);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button:disabled:hover { border-color: var(--border); color: var(--fg); }
+
   .topbar {
     display: flex;
     align-items: center;
@@ -32,6 +52,7 @@
     border-bottom: 1px solid var(--border);
     font-size: 13px;
     user-select: none;
+    flex-shrink: 0;
   }
   .dot { width: 12px; height: 12px; border-radius: 50%; }
   .dot.r { background: #ff5f57; }
@@ -52,11 +73,120 @@
   }
   .tab.active { color: var(--accent); border-color: var(--border); background: var(--bg); }
 
+  .panel { flex: 1; min-height: 0; display: none; flex-direction: column; }
+  .panel.active { display: flex; }
+
   #terminal { flex: 1; padding: 8px; overflow: hidden; display: none; }
   #terminal.active { display: block; }
   #desktop { flex: 1; padding: 8px; overflow: hidden; display: none; }
   #desktop.active { display: flex; }
   #desktop canvas { margin: auto; }
+
+  /* ---- Files (Finder-style) ---- */
+  .fbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .fbar-spacer { flex: 1; }
+  .breadcrumbs { display: flex; align-items: center; gap: 2px; font-size: 12px; overflow-x: auto; white-space: nowrap; color: var(--muted); }
+  .crumb { cursor: pointer; padding: 3px 6px; border-radius: 5px; }
+  .crumb:hover { color: var(--accent); background: var(--panel2); }
+  .crumb.last { color: var(--fg); }
+  .crumb-sep { color: var(--border); }
+
+  .fgrid {
+    flex: 1;
+    overflow: auto;
+    padding: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 6px;
+    align-content: start;
+  }
+  .fitem {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 4px;
+    border-radius: 8px;
+    cursor: default;
+    user-select: none;
+    border: 1px solid transparent;
+    text-align: center;
+  }
+  .fitem:hover { background: var(--panel2); }
+  .fitem.selected { background: #1c2a3a; border-color: var(--accent); }
+  .ficon { font-size: 30px; line-height: 1; }
+  .fname { font-size: 11.5px; color: var(--fg); word-break: break-word; max-width: 100%; line-height: 1.3; }
+  .fmeta { font-size: 9.5px; color: var(--muted); }
+  .fempty { color: var(--muted); padding: 24px; font-size: 13px; text-align: center; }
+
+  .fselbar {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .fselbar.show { display: flex; }
+  .fselname { color: var(--accent); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .fstatus { padding: 4px 12px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); flex-shrink: 0; }
+  .fstatus.err { color: var(--danger); }
+
+  /* ---- Editor (VS Code-ish) ---- */
+  .etabs {
+    display: flex;
+    align-items: stretch;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    flex-shrink: 0;
+  }
+  .etab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: var(--muted);
+    border-right: 1px solid var(--border);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .etab.active { color: var(--accent); background: var(--bg); }
+  .etab .dirty-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); display: none; }
+  .etab.dirty .dirty-dot { display: inline-block; }
+  .etab .close-x { color: var(--muted); padding: 0 2px; border-radius: 4px; }
+  .etab .close-x:hover { color: var(--danger); }
+
+  .ebar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .e-filename { color: var(--fg); }
+  .e-savestate { color: var(--muted); font-size: 11px; }
+
+  .e-cm-host { flex: 1; min-height: 0; display: none; }
+  .e-cm-host.active { display: block; }
+  .e-cm-host .CodeMirror { height: 100%; font-size: 13px; }
+  .e-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; }
 
   /* Login overlay */
   #login {
@@ -109,7 +239,7 @@
     cursor: pointer;
   }
   .card button:active { transform: translateY(1px); }
-  .err { color: #ff6b6b; font-size: 13px; min-height: 18px; margin-top: 10px; }
+  .err { color: var(--danger); font-size: 13px; min-height: 18px; margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -118,13 +248,49 @@
     <span class="title">webshell</span>
     <div id="tabs" class="tabs">
       <span class="tab active" data-tab="terminal">Terminal</span>
-      <span class="tab" data-tab="desktop">Desktop</span>
+      <span class="tab" data-tab="files">Files</span>
+      <span class="tab" data-tab="editor">Editor</span>
+      <span class="tab" id="tab-desktop" data-tab="desktop" style="display:none">Desktop</span>
     </div>
     <span id="status" class="status">disconnected</span>
   </div>
 
   <div id="terminal" class="active"></div>
   <div id="desktop"></div>
+
+  <div id="files" class="panel">
+    <div class="fbar">
+      <button id="f-up" title="Up one level">&#8593; Up</button>
+      <button id="f-refresh" title="Refresh">&#8635;</button>
+      <div id="f-breadcrumbs" class="breadcrumbs"></div>
+      <div class="fbar-spacer"></div>
+      <button id="f-newfolder">New Folder</button>
+      <button id="f-newfile">New File</button>
+      <button id="f-upload">Upload</button>
+      <input id="f-upload-input" type="file" multiple style="display:none" />
+    </div>
+    <div id="f-grid" class="fgrid"><div class="fempty">Connect to browse files.</div></div>
+    <div id="f-selbar" class="fselbar">
+      <span id="f-selname" class="fselname"></span>
+      <button id="f-open">Open</button>
+      <button id="f-download">Download</button>
+      <button id="f-rename">Rename</button>
+      <button id="f-delete">Delete</button>
+    </div>
+    <div id="f-status" class="fstatus"></div>
+  </div>
+
+  <div id="editor" class="panel">
+    <div id="e-tabs" class="etabs"></div>
+    <div class="ebar">
+      <span id="e-filename" class="e-filename">No file open</span>
+      <span id="e-savestate" class="e-savestate"></span>
+      <div class="fbar-spacer"></div>
+      <button id="e-save" disabled>Save &#8984;S</button>
+    </div>
+    <div id="e-cm-host" class="e-cm-host"></div>
+    <div id="e-empty" class="e-empty">Open a file from Files to start editing.</div>
+  </div>
 
   <div id="login">
     <div class="card">
@@ -142,6 +308,37 @@
     import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.7.0/core/rfb.js';
     window.__RFB = RFB;
   </script>
+
+  <!-- CodeMirror core + common language modes + a few nice-to-have addons -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/meta.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/selection/active-line.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldcode.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/brace-fold.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/indent-fold.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/clike/clike.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/shell/shell.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/xml/xml.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/css/css.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/htmlmixed/htmlmixed.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/markdown/markdown.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/php/php.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/ruby/ruby.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/go/go.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/rust/rust.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/perl/perl.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/toml/toml.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/dockerfile/dockerfile.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/nginx/nginx.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/properties/properties.min.js"></script>
+
   <script>
     const $ = (id) => document.getElementById(id);
     const loginEl = $('login');
@@ -149,16 +346,24 @@
     const tabsEl = $('tabs');
     let currentToken = null;
     let rfb = null;
+    let activeWs = null; // shared ws, used for both the pty stream and fs: rpc calls
 
+    // ============================= Tabs =============================
     function switchTab(name) {
       document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
       $('terminal').classList.toggle('active', name === 'terminal');
       $('desktop').classList.toggle('active', name === 'desktop');
+      $('files').classList.toggle('active', name === 'files');
+      $('editor').classList.toggle('active', name === 'editor');
       if (name === 'terminal') {
         fit.fit();
         term.focus();
       } else if (name === 'desktop') {
         connectDesktop();
+      } else if (name === 'files') {
+        if (filesRoot && !filesLoadedOnce) { filesLoadedOnce = true; loadDir(currentPath); }
+      } else if (name === 'editor') {
+        if (cm) cm.refresh();
       }
     }
     tabsEl.addEventListener('click', (e) => {
@@ -175,6 +380,7 @@
       rfb.addEventListener('disconnect', () => { rfb = null; });
     }
 
+    // ============================ Terminal ===========================
     const term = new Terminal({
       cursorBlink: true,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
@@ -203,6 +409,383 @@
       statusEl.classList.toggle('on', !!on);
     }
 
+    // ======================= base64 <-> bytes/utf8 =====================
+    function bytesToBase64(bytes) {
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+      }
+      return btoa(binary);
+    }
+    function base64ToBytes(b64) {
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+    function utf8ToBase64(str) { return bytesToBase64(new TextEncoder().encode(str)); }
+    function base64ToUtf8(b64) { return new TextDecoder('utf-8').decode(base64ToBytes(b64)); }
+
+    // ============================ fs: RPC ==============================
+    let fsReqCounter = 0;
+    const fsPending = new Map(); // reqId -> {resolve, reject}
+    function fsCall(op, extra) {
+      return new Promise((resolve, reject) => {
+        if (!activeWs || activeWs.readyState !== WebSocket.OPEN) {
+          reject(new Error('not connected'));
+          return;
+        }
+        const reqId = 'r' + (++fsReqCounter);
+        const timer = setTimeout(() => {
+          fsPending.delete(reqId);
+          reject(new Error('request timed out'));
+        }, 20000);
+        fsPending.set(reqId, {
+          resolve: (r) => { clearTimeout(timer); resolve(r); },
+          reject: (e) => { clearTimeout(timer); reject(e); },
+        });
+        activeWs.send(JSON.stringify({ type: 'fs', op, reqId, ...extra }));
+      });
+    }
+    function handleFsResult(m) {
+      const p = fsPending.get(m.reqId);
+      if (!p) return;
+      fsPending.delete(m.reqId);
+      if (m.ok) p.resolve(m);
+      else p.reject(new Error(m.error || 'unknown error'));
+    }
+
+    // ========================= path helpers =============================
+    function joinPath(base, name) {
+      if (base === '/') return '/' + name;
+      return base.replace(/\/+$/, '') + '/' + name;
+    }
+    function parentPath(p) {
+      const parts = p.split('/').filter(Boolean);
+      parts.pop();
+      return '/' + parts.join('/');
+    }
+    function baseName(p) {
+      const parts = p.split('/').filter(Boolean);
+      return parts.length ? parts[parts.length - 1] : '/';
+    }
+
+    // ============================ Files (Finder) =========================
+    let filesRoot = null;
+    let currentPath = null;
+    let filesLoadedOnce = false;
+    let selectedEntry = null; // {name, isDir, path}
+    let currentEntries = [];
+
+    const ICONS = {
+      dir: '\u{1F4C1}',
+      default: '\u{1F4C4}',
+      image: '\u{1F5BC}\uFE0F',
+      code: '\u{1F4DC}',
+      archive: '\u{1F5DC}\uFE0F',
+      script: '\u{1F4BB}',
+      md: '\u{1F4DD}',
+      config: '\u2699\uFE0F',
+    };
+    const EXT_ICON = {
+      png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', svg: 'image', webp: 'image', bmp: 'image', ico: 'image',
+      py: 'code', js: 'code', ts: 'code', jsx: 'code', tsx: 'code', c: 'code', cpp: 'code', h: 'code', java: 'code',
+      go: 'code', rs: 'code', rb: 'code', php: 'code', sql: 'code', pl: 'code',
+      sh: 'script', bash: 'script', zsh: 'script',
+      zip: 'archive', tar: 'archive', gz: 'archive', bz2: 'archive', xz: 'archive', '7z': 'archive',
+      md: 'md', markdown: 'md',
+      yml: 'config', yaml: 'config', toml: 'config', ini: 'config', conf: 'config', json: 'config', env: 'config',
+    };
+    function iconFor(entry) {
+      if (entry.isDir) return ICONS.dir;
+      const ext = entry.name.includes('.') ? entry.name.split('.').pop().toLowerCase() : '';
+      return ICONS[EXT_ICON[ext]] || ICONS.default;
+    }
+    function fmtSize(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+      return (n / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+    }
+
+    function setFStatus(text, isErr) {
+      $('f-status').textContent = text || '';
+      $('f-status').classList.toggle('err', !!isErr);
+    }
+
+    function renderBreadcrumbs(p) {
+      const el = $('f-breadcrumbs');
+      el.innerHTML = '';
+      const parts = p.split('/').filter(Boolean);
+      const addCrumb = (label, path, isLast) => {
+        const span = document.createElement('span');
+        span.className = 'crumb' + (isLast ? ' last' : '');
+        span.textContent = label;
+        span.addEventListener('click', () => loadDir(path));
+        el.appendChild(span);
+      };
+      addCrumb('/', '/', parts.length === 0);
+      let acc = '';
+      parts.forEach((part, i) => {
+        acc += '/' + part;
+        const sep = document.createElement('span');
+        sep.className = 'crumb-sep';
+        sep.textContent = '\u203A';
+        el.appendChild(sep);
+        addCrumb(part, acc, i === parts.length - 1);
+      });
+    }
+
+    function clearSelection() {
+      selectedEntry = null;
+      $('f-selbar').classList.remove('show');
+      document.querySelectorAll('.fitem.selected').forEach((n) => n.classList.remove('selected'));
+    }
+
+    function selectEntry(entry, node) {
+      document.querySelectorAll('.fitem.selected').forEach((n) => n.classList.remove('selected'));
+      node.classList.add('selected');
+      selectedEntry = entry;
+      $('f-selbar').classList.add('show');
+      $('f-selname').textContent = entry.name;
+      $('f-download').disabled = entry.isDir;
+      $('f-open').textContent = entry.isDir ? 'Open Folder' : 'Open in Editor';
+    }
+
+    function renderGrid(entries) {
+      currentEntries = entries;
+      const grid = $('f-grid');
+      grid.innerHTML = '';
+      clearSelection();
+      if (!entries.length) {
+        grid.innerHTML = '<div class="fempty">This folder is empty.</div>';
+        return;
+      }
+      for (const entry of entries) {
+        const node = document.createElement('div');
+        node.className = 'fitem';
+        node.innerHTML = `<div class="ficon">${iconFor(entry)}</div><div class="fname"></div><div class="fmeta"></div>`;
+        node.querySelector('.fname').textContent = entry.name;
+        node.querySelector('.fmeta').textContent = entry.isDir ? '' : fmtSize(entry.size);
+        node.addEventListener('click', (e) => { e.stopPropagation(); selectEntry(entry, node); });
+        node.addEventListener('dblclick', () => openEntry(entry));
+        grid.appendChild(node);
+      }
+    }
+
+    async function loadDir(p) {
+      setFStatus('Loading ' + p + ' \u2026');
+      try {
+        const r = await fsCall('list', { path: p });
+        currentPath = r.path || p;
+        renderBreadcrumbs(currentPath);
+        renderGrid(r.entries || []);
+        setFStatus(`${(r.entries || []).length} item(s)`);
+      } catch (e) {
+        setFStatus('Error: ' + e.message, true);
+      }
+    }
+
+    function openEntry(entry) {
+      const full = joinPath(currentPath, entry.name);
+      if (entry.isDir) {
+        loadDir(full);
+      } else {
+        switchTab('editor');
+        openFileInEditor(full);
+      }
+    }
+
+    $('f-up').addEventListener('click', () => { if (currentPath) loadDir(parentPath(currentPath)); });
+    $('f-refresh').addEventListener('click', () => { if (currentPath) loadDir(currentPath); });
+    $('f-grid').addEventListener('click', () => clearSelection());
+
+    $('f-newfolder').addEventListener('click', async () => {
+      const name = prompt('New folder name:');
+      if (!name) return;
+      try {
+        await fsCall('mkdir', { path: joinPath(currentPath, name) });
+        loadDir(currentPath);
+      } catch (e) { setFStatus('Error: ' + e.message, true); }
+    });
+    $('f-newfile').addEventListener('click', async () => {
+      const name = prompt('New file name:');
+      if (!name) return;
+      try {
+        await fsCall('write', { path: joinPath(currentPath, name), content: '' });
+        loadDir(currentPath);
+      } catch (e) { setFStatus('Error: ' + e.message, true); }
+    });
+    $('f-open').addEventListener('click', () => { if (selectedEntry) openEntry(selectedEntry); });
+    $('f-rename').addEventListener('click', async () => {
+      if (!selectedEntry) return;
+      const name = prompt('Rename to:', selectedEntry.name);
+      if (!name || name === selectedEntry.name) return;
+      try {
+        await fsCall('rename', { path: joinPath(currentPath, selectedEntry.name), newPath: joinPath(currentPath, name) });
+        loadDir(currentPath);
+      } catch (e) { setFStatus('Error: ' + e.message, true); }
+    });
+    $('f-delete').addEventListener('click', async () => {
+      if (!selectedEntry) return;
+      if (!confirm(`Delete "${selectedEntry.name}"? This can't be undone.`)) return;
+      try {
+        await fsCall('rm', { path: joinPath(currentPath, selectedEntry.name) });
+        loadDir(currentPath);
+      } catch (e) { setFStatus('Error: ' + e.message, true); }
+    });
+    $('f-download').addEventListener('click', async () => {
+      if (!selectedEntry || selectedEntry.isDir) return;
+      try {
+        const r = await fsCall('read', { path: joinPath(currentPath, selectedEntry.name) });
+        const bytes = base64ToBytes(r.content);
+        const blob = new Blob([bytes]);
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = selectedEntry.name;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      } catch (e) { setFStatus('Error: ' + e.message, true); }
+    });
+    $('f-upload').addEventListener('click', () => $('f-upload-input').click());
+    $('f-upload-input').addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files || []);
+      for (const file of files) {
+        try {
+          const buf = new Uint8Array(await file.arrayBuffer());
+          await fsCall('write', { path: joinPath(currentPath, file.name), content: bytesToBase64(buf) });
+        } catch (err) { setFStatus('Upload error: ' + err.message, true); }
+      }
+      e.target.value = '';
+      loadDir(currentPath);
+    });
+
+    // ============================ Editor (CodeMirror) =====================
+    const openFiles = new Map(); // path -> {doc, dirty}
+    let activeFilePath = null;
+    const cm = CodeMirror($('e-cm-host'), {
+      value: '',
+      lineNumbers: true,
+      theme: 'material-darker',
+      matchBrackets: true,
+      autoCloseBrackets: true,
+      styleActiveLine: true,
+      foldGutter: true,
+      gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
+      tabSize: 2,
+      indentUnit: 2,
+      lineWrapping: false,
+    });
+    $('e-cm-host').classList.add('active');
+
+    function modeForFilename(name) {
+      const info = CodeMirror.findModeByFileName(name);
+      return info ? (info.mime || info.mode) : null;
+    }
+
+    function renderEditorTabs() {
+      const bar = $('e-tabs');
+      bar.innerHTML = '';
+      for (const [p, f] of openFiles) {
+        const tab = document.createElement('div');
+        tab.className = 'etab' + (p === activeFilePath ? ' active' : '') + (f.dirty ? ' dirty' : '');
+        tab.innerHTML = `<span class="dirty-dot"></span><span class="etab-name"></span><span class="close-x">&times;</span>`;
+        tab.querySelector('.etab-name').textContent = baseName(p);
+        tab.title = p;
+        tab.addEventListener('click', (e) => {
+          if (e.target.closest('.close-x')) { closeFile(p); return; }
+          switchToFile(p);
+        });
+        bar.appendChild(tab);
+      }
+    }
+
+    function updateEbar() {
+      const has = !!activeFilePath;
+      $('e-filename').textContent = has ? activeFilePath : 'No file open';
+      $('e-save').disabled = !has;
+      const f = has ? openFiles.get(activeFilePath) : null;
+      $('e-savestate').textContent = f && f.dirty ? 'Unsaved changes' : (has ? 'Saved' : '');
+      $('e-cm-host').classList.toggle('active', has);
+      $('e-empty').style.display = has ? 'none' : 'flex';
+    }
+
+    function switchToFile(p) {
+      const f = openFiles.get(p);
+      if (!f) return;
+      activeFilePath = p;
+      cm.swapDoc(f.doc);
+      renderEditorTabs();
+      updateEbar();
+      setTimeout(() => cm.refresh(), 0);
+    }
+
+    function closeFile(p) {
+      const f = openFiles.get(p);
+      if (f && f.dirty && !confirm(`Discard unsaved changes to "${baseName(p)}"?`)) return;
+      openFiles.delete(p);
+      if (activeFilePath === p) {
+        activeFilePath = null;
+        const next = openFiles.keys().next();
+        if (!next.done) {
+          switchToFile(next.value);
+        } else {
+          cm.swapDoc(new CodeMirror.Doc('', null));
+          renderEditorTabs();
+          updateEbar();
+        }
+      } else {
+        renderEditorTabs();
+      }
+    }
+
+    async function openFileInEditor(fullPath) {
+      if (openFiles.has(fullPath)) { switchToFile(fullPath); return; }
+      try {
+        const r = await fsCall('read', { path: fullPath });
+        if (!r.isText) {
+          alert(`"${baseName(fullPath)}" doesn't look like a text file — open it from Files > Download instead.`);
+          return;
+        }
+        const text = base64ToUtf8(r.content);
+        const doc = new CodeMirror.Doc(text, modeForFilename(fullPath));
+        const entry = { doc, dirty: false };
+        doc.on('change', () => {
+          if (!entry.dirty) { entry.dirty = true; renderEditorTabs(); updateEbar(); }
+        });
+        openFiles.set(fullPath, entry);
+        switchToFile(fullPath);
+      } catch (e) {
+        alert('Could not open file: ' + e.message);
+      }
+    }
+
+    async function saveActiveFile() {
+      if (!activeFilePath) return;
+      const f = openFiles.get(activeFilePath);
+      if (!f) return;
+      $('e-savestate').textContent = 'Saving\u2026';
+      try {
+        await fsCall('write', { path: activeFilePath, content: utf8ToBase64(f.doc.getValue()) });
+        f.dirty = false;
+        renderEditorTabs();
+        updateEbar();
+        if (currentPath && parentPath(activeFilePath) === currentPath) loadDir(currentPath);
+      } catch (e) {
+        $('e-savestate').textContent = 'Save failed: ' + e.message;
+      }
+    }
+    $('e-save').addEventListener('click', saveActiveFile);
+    document.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        saveActiveFile();
+      }
+    });
+    updateEbar();
+
+    // ============================ WebSocket connect ========================
     function connect(token) {
       currentToken = token;
       loginEl.classList.add('hidden');
@@ -211,6 +794,7 @@
 
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+      activeWs = ws;
 
       const sendResize = () => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -225,11 +809,23 @@
       };
       ws.onmessage = (e) => {
         const m = JSON.parse(e.data);
-        if (m.type === 'output') term.write(m.data);
+        if (m.type === 'output') {
+          term.write(m.data);
+        } else if (m.type === 'fs:result') {
+          handleFsResult(m);
+        } else if (m.type === 'fs:home') {
+          filesRoot = m.path;
+          currentPath = m.path;
+          if ($('files').classList.contains('active')) {
+            filesLoadedOnce = true;
+            loadDir(currentPath);
+          }
+        }
       };
       ws.onclose = () => {
         setStatus('disconnected');
         term.write('\r\n\x1b[31m[connection closed]\x1b[0m\r\n');
+        if (activeWs === ws) activeWs = null;
       };
       ws.onerror = () => setStatus('error');
 
@@ -268,7 +864,8 @@
       try {
         cfg = await fetch('/api/config').then((r) => r.json());
       } catch {}
-      tabsEl.classList.toggle('show', !!cfg.desktopEnabled);
+      tabsEl.classList.add('show');
+      $('tab-desktop').style.display = cfg.desktopEnabled ? '' : 'none';
       if (!cfg.authRequired) {
         login(''); // localhost, no password
       } else {
