@@ -43,6 +43,16 @@ const IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_MIN || '20', 10) * 60 
 // Either way the container can't see your Mac's filesystem or LAN shares —
 // that isolation comes from the container boundary itself, not this flag.
 const CONTAINER_NETWORK = process.env.CONTAINER_NETWORK || 'bridge';
+// Comma-separated names of host env vars to forward into every fresh
+// container as -e VAR=value (e.g. "DATABASE_URL,NEON_DATABASE_URL"). Lets
+// you set a Neon/Postgres connection string once on the host and have it
+// available in every session without it living anywhere in the container's
+// (ephemeral) filesystem. Only the listed names are forwarded — the rest
+// of the host's env stays out of the sandbox. See README for setup.
+const SANDBOX_ENV_PASSTHROUGH = (process.env.SANDBOX_ENV_PASSTHROUGH || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 // ---- Local-mode config (fallback, same as the original version) -------
 const SHELL =
@@ -648,6 +658,9 @@ wss.on('connection', (ws) => {
       '--read-only',
       '--tmpfs', `/tmp:rw,exec,size=${CONTAINER_TMP_SIZE},mode=1777`,
       '--tmpfs', `/home/sandbox:rw,exec,size=${CONTAINER_HOME_SIZE},uid=1000,gid=1000,mode=0755`,
+      ...SANDBOX_ENV_PASSTHROUGH.flatMap((name) =>
+        process.env[name] !== undefined ? ['-e', `${name}=${process.env[name]}`] : []
+      ),
       '--user', 'sandbox',
       SANDBOX_IMAGE,
       '/bin/bash',
