@@ -1,4 +1,3 @@
-
 # Minimal sandbox image for the webshell. Each browser session gets a fresh
 # container from this image, run with --network none and a locked-down
 # capability set (see server.js). Nothing here should be treated as a place
@@ -15,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       binwalk libimage-exiftool-perl steghide foremost bsdmainutils xxd \
       unzip zip p7zip-full bzip2 xz-utils \
       dnsutils nmap jq \
+      postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 # Package groups above, for reference:
 #   shell/core:      bash coreutils grep sed gawk findutils
@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   forensics/stego:  binwalk libimage-exiftool-perl steghide foremost bsdmainutils xxd
 #   archives:         unzip zip p7zip-full bzip2 xz-utils
 #   networking tools: dnsutils nmap jq
+#   databases:        postgresql-client (psql — for Neon/Postgres, see README)
  
 # Non-root user, pinned to a known uid/gid (1000:1000) so server.js can
 # mount the per-session home directory with matching ownership — otherwise
