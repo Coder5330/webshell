@@ -7,6 +7,8 @@ const os = require('os');
 const crypto = require('crypto');
 const { execSync, spawn } = require('child_process');
 const net = require('net');
+const fs = require('fs');
+const fsp = require('fs/promises');
 const WebSocket = require('ws');
 const pty = require('node-pty');
 
@@ -330,7 +332,265 @@ vncWss.on('connection', (ws) => {
 // for the container cap and the idle sweep.
 const activeContainers = new Map();
 
-function wireTerm(ws, term, sessionState) {
+// ---- File manager / editor backend -----------------------------------
+// Same trust boundary as the terminal itself: docker-mode ops run inside
+// that session's own throwaway container (via `docker exec`, arguments
+// passed as an argv array — never interpolated into a shell string), and
+// local-mode ops touch the host directly, exactly like the pty shell
+// already does. This doesn't grant any capability the user doesn't
+// already have through the terminal; it's just a friendlier UI over it.
+const FS_EXEC_TIMEOUT_MS = 15000;
+const FS_MAX_FILE_BYTES = 3 * 1024 * 1024;
+
+const PY_LIST = `
+import sys, os, json
+p = sys.argv[1]
+try:
+    entries = []
+    with os.scandir(p) as it:
+        for e in it:
+            try:
+                st = e.stat(follow_symlinks=False)
+                is_link = e.is_symlink()
+                is_dir = e.is_dir(follow_symlinks=True)
+                entries.append({"name": e.name, "isDir": is_dir, "isSymlink": is_link,
+                                 "size": st.st_size, "mtime": int(st.st_mtime)})
+            except OSError:
+                pass
+    entries.sort(key=lambda x: (not x["isDir"], x["name"].lower()))
+    print(json.dumps({"ok": True, "path": os.path.abspath(p), "entries": entries}))
+except Exception as ex:
+    print(json.dumps({"ok": False, "error": str(ex)}))
+`;
+
+const PY_READ = `
+import sys, os, json, base64
+p = sys.argv[1]
+MAX = ${FS_MAX_FILE_BYTES}
+try:
+    size = os.path.getsize(p)
+    if size > MAX:
+        print(json.dumps({"ok": False, "error": "file too large to open (%d bytes, max %d)" % (size, MAX)}))
+    else:
+        with open(p, "rb") as f:
+            data = f.read()
+        is_text = True
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            is_text = False
+        print(json.dumps({"ok": True, "content": base64.b64encode(data).decode("ascii"), "isText": is_text, "size": size}))
+except Exception as ex:
+    print(json.dumps({"ok": False, "error": str(ex)}))
+`;
+
+const PY_WRITE = `
+import sys, os, json, base64
+p = sys.argv[1]
+try:
+    raw = sys.stdin.buffer.read()
+    data = base64.b64decode(raw)
+    d = os.path.dirname(p)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(p, "wb") as f:
+        f.write(data)
+    print(json.dumps({"ok": True, "size": len(data)}))
+except Exception as ex:
+    print(json.dumps({"ok": False, "error": str(ex)}))
+`;
+
+const PY_MKDIR = `
+import sys, os, json
+p = sys.argv[1]
+try:
+    os.makedirs(p, exist_ok=True)
+    print(json.dumps({"ok": True}))
+except Exception as ex:
+    print(json.dumps({"ok": False, "error": str(ex)}))
+`;
+
+const PY_RM = `
+import sys, os, json, shutil
+p = sys.argv[1]
+try:
+    if os.path.isdir(p) and not os.path.islink(p):
+        shutil.rmtree(p)
+    else:
+        os.remove(p)
+    print(json.dumps({"ok": True}))
+except Exception as ex:
+    print(json.dumps({"ok": False, "error": str(ex)}))
+`;
+
+const PY_RENAME = `
+import sys, os, json
+src, dst = sys.argv[1], sys.argv[2]
+try:
+    os.rename(src, dst)
+    print(json.dumps({"ok": True}))
+except Exception as ex:
+    print(json.dumps({"ok": False, "error": str(ex)}))
+`;
+
+function dockerExecPy(containerName, script, args, stdinB64) {
+  return new Promise((resolve) => {
+    const dockerArgs = ['exec', ...(stdinB64 != null ? ['-i'] : []), containerName, 'python3', '-c', script, ...args];
+    const child = spawn('docker', dockerArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    let done = false;
+    const timer = setTimeout(() => {
+      if (!done) {
+        done = true;
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        resolve({ ok: false, error: 'timed out' });
+      }
+    }, FS_EXEC_TIMEOUT_MS);
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ ok: false, error: e.message });
+    });
+    child.on('close', () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        const line = out.trim().split('\n').pop();
+        resolve(JSON.parse(line));
+      } catch {
+        resolve({ ok: false, error: (err || out || 'no output').trim().slice(0, 500) });
+      }
+    });
+    if (stdinB64 != null) {
+      child.stdin.write(stdinB64);
+    }
+    child.stdin.end();
+  });
+}
+
+// ---- Local-mode fs helpers (direct host access, same trust level as the
+// pty shell in local mode — no extra confinement is added here). --------
+async function localList(p) {
+  const names = await fsp.readdir(p);
+  const entries = [];
+  for (const name of names) {
+    const full = path.join(p, name);
+    try {
+      const lst = await fsp.lstat(full);
+      const isSymlink = lst.isSymbolicLink();
+      const st = isSymlink ? await fsp.stat(full).catch(() => lst) : lst;
+      entries.push({
+        name,
+        isDir: st.isDirectory(),
+        isSymlink,
+        size: st.size,
+        mtime: Math.floor(st.mtimeMs / 1000),
+      });
+    } catch {
+      /* skip unreadable entries */
+    }
+  }
+  entries.sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
+  return { ok: true, path: path.resolve(p), entries };
+}
+async function localRead(p) {
+  const st = await fsp.stat(p);
+  if (st.size > FS_MAX_FILE_BYTES) {
+    return { ok: false, error: `file too large to open (${st.size} bytes, max ${FS_MAX_FILE_BYTES})` };
+  }
+  const data = await fsp.readFile(p);
+  let isText = true;
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(data);
+  } catch {
+    isText = false;
+  }
+  return { ok: true, content: data.toString('base64'), isText, size: st.size };
+}
+async function localWrite(p, b64) {
+  const data = Buffer.from(b64, 'base64');
+  await fsp.mkdir(path.dirname(p), { recursive: true });
+  await fsp.writeFile(p, data);
+  return { ok: true, size: data.length };
+}
+async function localMkdir(p) {
+  await fsp.mkdir(p, { recursive: true });
+  return { ok: true };
+}
+async function localRm(p) {
+  await fsp.rm(p, { recursive: true, force: false });
+  return { ok: true };
+}
+async function localRename(src, dst) {
+  await fsp.rename(src, dst);
+  return { ok: true };
+}
+
+async function handleFsOp(ws, msg, fsCtx) {
+  const { op, reqId } = msg;
+  let result;
+  try {
+    if (fsCtx.mode === 'docker') {
+      switch (op) {
+        case 'list':
+          result = await dockerExecPy(fsCtx.name, PY_LIST, [msg.path]);
+          break;
+        case 'read':
+          result = await dockerExecPy(fsCtx.name, PY_READ, [msg.path]);
+          break;
+        case 'write':
+          result = await dockerExecPy(fsCtx.name, PY_WRITE, [msg.path], msg.content || '');
+          break;
+        case 'mkdir':
+          result = await dockerExecPy(fsCtx.name, PY_MKDIR, [msg.path]);
+          break;
+        case 'rm':
+          result = await dockerExecPy(fsCtx.name, PY_RM, [msg.path]);
+          break;
+        case 'rename':
+          result = await dockerExecPy(fsCtx.name, PY_RENAME, [msg.path, msg.newPath]);
+          break;
+        default:
+          result = { ok: false, error: 'unknown op' };
+      }
+    } else {
+      switch (op) {
+        case 'list':
+          result = await localList(msg.path);
+          break;
+        case 'read':
+          result = await localRead(msg.path);
+          break;
+        case 'write':
+          result = await localWrite(msg.path, msg.content || '');
+          break;
+        case 'mkdir':
+          result = await localMkdir(msg.path);
+          break;
+        case 'rm':
+          result = await localRm(msg.path);
+          break;
+        case 'rename':
+          result = await localRename(msg.path, msg.newPath);
+          break;
+        default:
+          result = { ok: false, error: 'unknown op' };
+      }
+    }
+  } catch (e) {
+    result = { ok: false, error: e && e.message ? e.message : String(e) };
+  }
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'fs:result', reqId, ...result }));
+  }
+}
+
+function wireTerm(ws, term, sessionState, fsCtx) {
   term.onData((data) => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'output', data }));
@@ -353,6 +613,8 @@ function wireTerm(ws, term, sessionState) {
       } catch {
         /* ignore */
       }
+    } else if (msg.type === 'fs' && fsCtx) {
+      handleFsOp(ws, msg, fsCtx);
     }
   });
 }
@@ -401,7 +663,8 @@ wss.on('connection', (ws) => {
 
     const sessionState = { name, term, lastActivity: Date.now() };
     activeContainers.set(ws, sessionState);
-    wireTerm(ws, term, sessionState);
+    wireTerm(ws, term, sessionState, { mode: 'docker', name });
+    ws.send(JSON.stringify({ type: 'fs:home', path: '/home/sandbox' }));
 
     const cleanup = () => {
       if (!activeContainers.has(ws)) return;
@@ -458,7 +721,9 @@ wss.on('connection', (ws) => {
       ...(dropUser ? { uid: dropUser.uid, gid: dropUser.gid } : {}),
     });
 
-    wireTerm(ws, term, null);
+    const localHome = dropUser ? dropUser.home : process.env.HOME || os.homedir();
+    wireTerm(ws, term, null, { mode: 'local' });
+    ws.send(JSON.stringify({ type: 'fs:home', path: localHome }));
 
     ws.on('close', () => {
       try {
