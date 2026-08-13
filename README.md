@@ -32,6 +32,27 @@ Open http://127.0.0.1:3000 — you'll land in a fresh container as the
 non-root `sandbox` user. Close the tab (or let it sit idle) and the
 container is torn down.
 
+## Files & Editor tabs
+
+Alongside the terminal, the UI now has:
+
+- **Files** — a Finder-style browser (breadcrumbs, grid of icons, new
+  file/folder, rename, delete, upload, download) for whatever the terminal
+  is currently looking at: the per-session container's filesystem in
+  `docker` mode, or the host in `local` mode.
+- **Editor** — a CodeMirror-based code editor with syntax highlighting,
+  multiple tabs, and Cmd/Ctrl+S to save. Double-click a file in Files (or
+  hit "Open" on the selection bar) to open it here.
+
+These talk to the server over the same authenticated WebSocket as the
+terminal, using a small `fs:` message protocol. In `docker` mode the server
+runs `python3` inside that session's own container via `docker exec`
+(arguments passed as an argv array, never through a shell string) — so
+Files/Editor can only ever see that one throwaway container, same as the
+terminal. In `local` mode it touches the host directly via Node's `fs`
+module, at the same trust level the shell already has there. Neither mode
+grants any access beyond what the terminal itself already allows.
+
 ## Modes
 
 | `MODE`   | What it does                                                          |
