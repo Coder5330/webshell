@@ -11,6 +11,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const WebSocket = require('ws');
 const pty = require('node-pty');
+const { Pool } = require('pg');
 
 // ---- Config (all via environment variables) --------------------------------
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -53,6 +54,100 @@ const SANDBOX_ENV_PASSTHROUGH = (process.env.SANDBOX_ENV_PASSTHROUGH || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+
+// ---- Optional persistence (Neon/Postgres) -------------------------------
+// Every docker-mode session gets a brand-new, empty throwaway container, so
+// anything saved in one session is gone once it ends. If DATABASE_URL is
+// set on the HOST (same var you'd list in SANDBOX_ENV_PASSTHROUGH), the
+// server itself also mirrors every successful fs write out to Postgres,
+// keyed by file path, and transparently restores a file from there the
+// first time it's read in a fresh session (e.g. right after opening it in
+// a brand-new container). This is a simple path-keyed overlay, not a
+// per-session snapshot — two sessions editing the same path will still
+// last-write-wins against each other, same as the container fs would.
+const PERSIST_DATABASE_URL = process.env.DATABASE_URL || '';
+const pgPool = PERSIST_DATABASE_URL
+  ? new Pool({ connectionString: PERSIST_DATABASE_URL, max: 5 })
+  : null;
+
+let pgReady = null;
+function ensurePgSchema() {
+  if (!pgPool) return Promise.resolve(false);
+  if (!pgReady) {
+    pgReady = pgPool
+      .query(
+        `CREATE TABLE IF NOT EXISTS webshell_files (
+           path TEXT PRIMARY KEY,
+           content TEXT NOT NULL,
+           updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+         )`
+      )
+      .then(() => true)
+      .catch((e) => {
+        console.error('[persist] failed to create webshell_files table:', e.message);
+        pgReady = null; // allow retry on next op
+        return false;
+      });
+  }
+  return pgReady;
+}
+
+async function persistWrite(p, b64Content) {
+  if (!pgPool) return;
+  const ok = await ensurePgSchema();
+  if (!ok) return;
+  try {
+    await pgPool.query(
+      `INSERT INTO webshell_files (path, content, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (path) DO UPDATE SET content = EXCLUDED.content, updated_at = now()`,
+      [p, b64Content]
+    );
+  } catch (e) {
+    console.error('[persist] write failed for', p, e.message);
+  }
+}
+
+async function persistDelete(p) {
+  if (!pgPool) return;
+  const ok = await ensurePgSchema();
+  if (!ok) return;
+  try {
+    // Covers both the exact file and, for directories, anything nested
+    // under it (path + '/%').
+    await pgPool.query(`DELETE FROM webshell_files WHERE path = $1 OR path LIKE $2`, [p, `${p}/%`]);
+  } catch (e) {
+    console.error('[persist] delete failed for', p, e.message);
+  }
+}
+
+async function persistRename(src, dst) {
+  if (!pgPool) return;
+  const ok = await ensurePgSchema();
+  if (!ok) return;
+  try {
+    await pgPool.query(`UPDATE webshell_files SET path = $2 WHERE path = $1`, [src, dst]);
+    await pgPool.query(
+      `UPDATE webshell_files SET path = $2 || substring(path from length($1) + 1) WHERE path LIKE $3`,
+      [src, dst, `${src}/%`]
+    );
+  } catch (e) {
+    console.error('[persist] rename failed for', src, '->', dst, e.message);
+  }
+}
+
+async function persistLookup(p) {
+  if (!pgPool) return null;
+  const ok = await ensurePgSchema();
+  if (!ok) return null;
+  try {
+    const res = await pgPool.query(`SELECT content FROM webshell_files WHERE path = $1`, [p]);
+    return res.rows[0] ? res.rows[0].content : null;
+  } catch (e) {
+    console.error('[persist] lookup failed for', p, e.message);
+    return null;
+  }
+}
 
 // ---- Local-mode config (fallback, same as the original version) -------
 const SHELL =
@@ -552,18 +647,32 @@ async function handleFsOp(ws, msg, fsCtx) {
           break;
         case 'read':
           result = await dockerExecPy(fsCtx.name, PY_READ, [msg.path]);
+          if (!result.ok && pgPool) {
+            // Fresh container (or file just never existed here) — see if
+            // Neon has a copy from a previous session and restore it.
+            const restored = await persistLookup(msg.path);
+            if (restored != null) {
+              const writeBack = await dockerExecPy(fsCtx.name, PY_WRITE, [msg.path], restored);
+              if (writeBack.ok) {
+                result = await dockerExecPy(fsCtx.name, PY_READ, [msg.path]);
+              }
+            }
+          }
           break;
         case 'write':
           result = await dockerExecPy(fsCtx.name, PY_WRITE, [msg.path], msg.content || '');
+          if (result.ok) await persistWrite(msg.path, msg.content || '');
           break;
         case 'mkdir':
           result = await dockerExecPy(fsCtx.name, PY_MKDIR, [msg.path]);
           break;
         case 'rm':
           result = await dockerExecPy(fsCtx.name, PY_RM, [msg.path]);
+          if (result.ok) await persistDelete(msg.path);
           break;
         case 'rename':
           result = await dockerExecPy(fsCtx.name, PY_RENAME, [msg.path, msg.newPath]);
+          if (result.ok) await persistRename(msg.path, msg.newPath);
           break;
         default:
           result = { ok: false, error: 'unknown op' };
@@ -575,18 +684,33 @@ async function handleFsOp(ws, msg, fsCtx) {
           break;
         case 'read':
           result = await localRead(msg.path);
+          if (!result.ok && pgPool) {
+            const restored = await persistLookup(msg.path);
+            if (restored != null) {
+              const writeBack = await localWrite(msg.path, restored).catch((e) => ({
+                ok: false,
+                error: e.message,
+              }));
+              if (writeBack.ok) {
+                result = await localRead(msg.path);
+              }
+            }
+          }
           break;
         case 'write':
           result = await localWrite(msg.path, msg.content || '');
+          if (result.ok) await persistWrite(msg.path, msg.content || '');
           break;
         case 'mkdir':
           result = await localMkdir(msg.path);
           break;
         case 'rm':
           result = await localRm(msg.path);
+          if (result.ok) await persistDelete(msg.path);
           break;
         case 'rename':
           result = await localRename(msg.path, msg.newPath);
+          if (result.ok) await persistRename(msg.path, msg.newPath);
           break;
         default:
           result = { ok: false, error: 'unknown op' };
